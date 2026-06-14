@@ -114,6 +114,19 @@
           <button class="chip-ex" type="button">将来が不安で眠れない</button>
         </div>
 
+        <!-- 今日の賢者（日替わり・連続来訪） -->
+        <section class="daily reveal" id="daily" style="--rd:1.25s" hidden>
+          <div class="daily-head">
+            <span class="daily-eyebrow">🌅 今日の賢者</span>
+            <span class="daily-streak" id="dailyStreak" hidden></span>
+          </div>
+          <p class="daily-hook" id="dailyHook">　</p>
+          <div class="daily-foot">
+            <span class="daily-name" id="dailyName"></span>
+            <button class="daily-open" id="dailyOpen" type="button">今日の一枚を読む →</button>
+          </div>
+        </section>
+
         <button class="favlink" id="favOpen" type="button" hidden>♥ 保存した言葉（<span id="favCount">0</span>）</button>
       </section>
 
@@ -125,8 +138,9 @@
           <span class="ln r"></span>
         </div>
         <div class="results__tools" id="resultTools">
-          <button class="chip-tool" id="copyLinkBtn" type="button">リンクをコピー</button>
+          <button class="chip-tool battle-cta" id="battleBtn" type="button" hidden>⚔ 二人の賢者で対決させる</button>
           <button class="chip-tool" id="rerollBtn" type="button">別の賢者に聞く ↻</button>
+          <button class="chip-tool" id="copyLinkBtn" type="button">リンクをコピー</button>
         </div>
 
         <div class="cards" id="cards"></div>

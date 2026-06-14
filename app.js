@@ -26,16 +26,26 @@
     tools:      $('#resultTools'),
     copyLinkBtn:$('#copyLinkBtn'),
     rerollBtn:  $('#rerollBtn'),
+    battleBtn:  $('#battleBtn'),
     cards:      $('#cards'),
     resetBtn:   $('#resetBtn'),
     canvas:     $('#shareCanvas'),
+    daily:      $('#daily'),
+    dailyHook:  $('#dailyHook'),
+    dailyName:  $('#dailyName'),
+    dailyStreak:$('#dailyStreak'),
+    dailyOpen:  $('#dailyOpen'),
   };
 
   const NUM_CARDS = 1;
-  const FAV_KEY   = 'kenja_favs_v1';
+  const FAV_KEY    = 'kenja_favs_v1';
+  const STREAK_KEY = 'kenja_streak_v1';
+  const BVOTE_KEY  = 'kenja_battle_votes_v1';
   const BASE_URL  = location.origin + location.pathname;
+  /* 共有画像に焼き込む本番URL（スクショからの流入導線） */
+  const SHARE_URL = 'sousuyou.github.io/kenja-no-henshin';
 
-  let state = { worry: '', themeKey: null, mode: 'result', scored: null };
+  let state = { worry: '', themeKey: null, mode: 'result', scored: null, grief: false, battle: null };
 
   /* 名言のID（哲学者キー＋本文ハッシュ）と逆引きマップ */
   function hashStr(s) {
@@ -56,6 +66,67 @@
   }
   const QUOTE_BIGRAMS = QUOTES.map((q) => bigrams(q.quote + ' ' + q.note + ' ' + (q.hook || '')));
   const isContentBg = (bg) => /[一-鿿゠-ヿ々]/.test(bg); // 漢字・カタカナを含む＝内容語
+
+  /* 大切な存在を失った悲しみ（＝死への恐怖ではなくグリーフ）か */
+  const GRIEF_RE = /(亡く|喪失|失っ|失く|逝|他界|死別|大切な人|ペット|立ち直れ|涙)/;
+  function isGrief(text) { return GRIEF_RE.test(text || ''); }
+
+  /* ---------------------------------------------------------------
+   * 賢者の気質（バトル用）。同じ悩みに「逆の答え」を返す2人を作るための軸。
+   *   do  = 前へ進め派（行動・克己・喝）
+   *   sei = 力を抜け派（受容・手放し・自然体）
+   * ------------------------------------------------------------- */
+  const TEMPER = {
+    socrates:'do', platon:'do', aristoteles:'do', diogenes:'sei', epicurus:'sei',
+    heraclitus:'do', epictetus:'do', seneca:'do', aurelius:'do', montaigne:'sei',
+    pascal:'sei', spinoza:'sei', kant:'do', rousseau:'sei', goethe:'do',
+    schopenhauer:'sei', kierkegaard:'do', nietzsche:'do', emerson:'do', thoreau:'sei',
+    mill:'do', russell:'do', wittgenstein:'sei', sartre:'do', camus:'do',
+    beauvoir:'do', arendt:'do', weil:'sei', alain:'do', laozi:'sei',
+    zhuangzi:'sei', confucius:'do', mencius:'do', buddha:'sei', nishida:'sei',
+  };
+  const CAMP = {
+    do:  { label: '前へ進め', sub: '攻めの一手', color: '#c0708a' },
+    sei: { label: '力を抜け', sub: '受けの一手', color: '#7fa99b' },
+  };
+  function temperOf(phil) { return TEMPER[phil] || 'do'; }
+  function campOf(phil)   { return CAMP[temperOf(phil)]; }
+
+  /* ---------------------------------------------------------------
+   * 日替わり「今日の賢者」＋連続来訪（ストリーク）
+   * ------------------------------------------------------------- */
+  function todayStr(d) {
+    d = d || new Date();
+    return d.getFullYear() + '-' + (d.getMonth() + 1) + '-' + d.getDate();
+  }
+  /* 日付シードで全員に同じ1枚（＝「今日の賢者◯◯だった」が同時多発する） */
+  function dailyQuote() {
+    const idx = parseInt(hashStr('day:' + todayStr()), 36) % QUOTES.length;
+    return QUOTES[idx];
+  }
+  function updateStreak() {
+    let s;
+    try { s = JSON.parse(localStorage.getItem(STREAK_KEY) || 'null'); } catch { s = null; }
+    const today = todayStr();
+    if (!s || !s.last) {
+      s = { last: today, count: 1, best: 1 };
+    } else if (s.last !== today) {
+      const y = new Date(); y.setDate(y.getDate() - 1);
+      s.count = (s.last === todayStr(y)) ? (s.count + 1) : 1;
+      s.last = today;
+      if (s.count > (s.best || 0)) s.best = s.count;
+    }
+    try { localStorage.setItem(STREAK_KEY, JSON.stringify(s)); } catch {}
+    return s;
+  }
+
+  /* バトルの投票（この端末内の集計・正直なローカル値） */
+  function loadBVotes() { try { return JSON.parse(localStorage.getItem(BVOTE_KEY) || '{}'); } catch { return {}; } }
+  function bumpBVote(camp) {
+    const v = loadBVotes(); v[camp] = (v[camp] || 0) + 1;
+    try { localStorage.setItem(BVOTE_KEY, JSON.stringify(v)); } catch {}
+    return v;
+  }
 
   /* ---------------------------------------------------------------
    * お気に入り（localStorage）
@@ -223,13 +294,18 @@
   }
 
   function showResult(themeKey, quotes, opts = {}) {
-    state.mode = 'result';
+    state.mode = opts.mode || 'result';
     state.themeKey = themeKey;
+    state.battle = null;
     els.tools.hidden = false;
-    els.resultHead.innerHTML =
-      `今のあなたの心は『<span class="hl">${escapeHTML(THEMES[themeKey].label)}</span>』。`
-      + `賢者からの返信が<span class="hl">${quotes.length}通</span>、届きました`;
+    els.resultHead.innerHTML = opts.headerHTML
+      || (`今のあなたの心は『<span class="hl">${escapeHTML(THEMES[themeKey].label)}</span>』。`
+        + `賢者からの返信が<span class="hl">${quotes.length}通</span>、届きました`);
     renderCards(quotes);
+    // ツールの出し分け：実際の悩みに対する結果のときだけ「引き直し」「対決」を出す
+    const real = state.mode === 'result' && !!state.worry;
+    els.rerollBtn.hidden = !real;
+    if (els.battleBtn) els.battleBtn.hidden = !(real && state.scored && !state.grief);
     els.results.hidden = false;
     if (opts.scroll !== false) els.results.scrollIntoView({ behavior: 'smooth', block: 'start' });
     updateFavUI();
@@ -246,6 +322,141 @@
     els.results.hidden = false;
     els.results.scrollIntoView({ behavior: 'smooth', block: 'start' });
     updateFavUI();
+  }
+
+  /* 単体表示（バトルから「この人だけ読む」／日替わりの今日の賢者） */
+  function showSingle(q, headerHTML, allowBattle) {
+    state.mode = 'single';
+    state.battle = null;
+    els.tools.hidden = false;
+    els.resultHead.innerHTML = headerHTML;
+    renderCards([q]);
+    els.rerollBtn.hidden = true;
+    if (els.battleBtn) els.battleBtn.hidden = !(allowBattle && state.worry && state.scored && !state.grief);
+    els.results.hidden = false;
+    els.results.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    updateFavUI();
+  }
+
+  /* ---------------------------------------------------------------
+   * 賢者バトル：同じ悩みに、気質の逆な2人が逆の答えを返す
+   * ------------------------------------------------------------- */
+  /* A=最も刺さる1件。B=反対の気質から最上位（避けたい哲学者は除外して別対決に） */
+  function pickBattle(scored, avoid) {
+    if (!scored || !scored.length) return null;
+    const avoidPhil = avoid ? new Set(avoid.map((q) => q.phil)) : null;
+    const poolA = scored.filter((x) => x.total > 0).slice(0, 16);
+    let a = avoidPhil
+      ? (poolA.find((x) => !avoidPhil.has(x.q.phil)) || poolA[0] || scored[0])
+      : scored[0];
+    if (!a) a = scored[0];
+    const want = temperOf(a.q.phil) === 'do' ? 'sei' : 'do';
+    const diff = (x) => x.q.phil !== a.q.phil && (!avoidPhil || !avoidPhil.has(x.q.phil));
+    const b = scored.find((x) => diff(x) && temperOf(x.q.phil) === want && x.total > 0)
+           || scored.find((x) => x.q.phil !== a.q.phil && temperOf(x.q.phil) === want)
+           || scored.find((x) => diff(x))
+           || scored.find((x) => x.q.phil !== a.q.phil);
+    if (!b) return null;
+    return [a.q, b.q];
+  }
+
+  function buildBattle(pair) {
+    const [qa, qb] = pair;
+    const wrap = document.createElement('div');
+    wrap.className = 'battle';
+
+    const cardHTML = (q, side) => {
+      const p = PHILOSOPHERS[q.phil], c = campOf(q.phil);
+      return `
+        <article class="bcard side-${side}" style="--accent:${p.color};--camp:${c.color}">
+          ${CCNR}
+          <span class="bcamp">“${escapeHTML(c.label)}”</span>
+          <div class="bname">${escapeHTML(p.name)}</div>
+          <div class="bdates">${escapeHTML(p.dates)}</div>
+          ${q.hook ? `<p class="bhook">${escapeHTML(q.hook)}</p>` : ''}
+          <blockquote class="bquote">${escapeHTML(q.quote)}</blockquote>
+          ${q.source ? `<p class="bsource">${escapeHTML(q.source)}</p>` : ''}
+          <button class="bsolo" type="button" data-side="${side}">▸ この人だけで読む</button>
+        </article>`;
+    };
+
+    wrap.innerHTML = `
+      <div class="battle-arena">
+        ${cardHTML(qa, 'a')}
+        <div class="vs" aria-hidden="true"><span>VS</span></div>
+        ${cardHTML(qb, 'b')}
+      </div>
+      <p class="battle-ask">どちらの言葉が、いまのあなたに刺さった？</p>
+      <div class="battle-vote">
+        <button class="vote-btn" type="button" data-pick="a">${escapeHTML(PHILOSOPHERS[qa.phil].name)}</button>
+        <button class="vote-btn" type="button" data-pick="b">${escapeHTML(PHILOSOPHERS[qb.phil].name)}</button>
+      </div>
+      <div class="battle-result" hidden></div>
+      <div class="battle-foot">
+        <button class="chip-tool battle-share" type="button">⚔ この対決を画像でシェア</button>
+        <button class="chip-tool" data-act="more" type="button">別の対決を見る ↻</button>
+      </div>`;
+
+    const arena = wrap.querySelector('.battle-arena');
+    const resultBox = wrap.querySelector('.battle-result');
+    const voteBtns = wrap.querySelectorAll('.vote-btn');
+    let voted = false;
+    voteBtns.forEach((btn) => btn.addEventListener('click', () => {
+      if (voted) return; voted = true;
+      const pick = btn.dataset.pick;
+      const q = pick === 'a' ? qa : qb;
+      const v = bumpBVote(temperOf(q.phil));
+      arena.querySelector('.side-' + pick).classList.add('is-pick');
+      arena.querySelector('.side-' + (pick === 'a' ? 'b' : 'a')).classList.add('is-faded');
+      voteBtns.forEach((b) => { b.disabled = true; b.classList.toggle('chosen', b === btn); });
+      const total = (v.do || 0) + (v.sei || 0);
+      const pct = (k) => total ? Math.round((v[k] || 0) / total * 100) : 0;
+      resultBox.hidden = false;
+      resultBox.innerHTML =
+        `<p class="br-lead">あなたは <b>${escapeHTML(PHILOSOPHERS[q.phil].name)}</b>（${escapeHTML(campOf(q.phil).label)}派）を選びました。</p>`
+        + `<p class="br-tally">この端末の投票　前へ進め <b>${pct('do')}%</b> ／ 力を抜け <b>${pct('sei')}%</b> <span class="br-n">（計${total}回）</span></p>`;
+    }));
+
+    wrap.querySelector('.battle-share').addEventListener('click', () => shareBattle(pair));
+    wrap.querySelector('[data-act="more"]').addEventListener('click', () => {
+      const next = pickBattle(state.scored, pair);
+      if (next) renderBattle(next); else toast('別の対決が見つかりませんでした');
+    });
+    wrap.querySelectorAll('.bsolo').forEach((b) => b.addEventListener('click', () => {
+      const q = b.dataset.side === 'a' ? qa : qb;
+      showSingle(q, `<span class="hl">${escapeHTML(PHILOSOPHERS[q.phil].name)}</span> の返信`, true);
+    }));
+    return wrap;
+  }
+
+  function renderBattle(pair) {
+    state.battle = pair;
+    state.mode = 'battle';
+    els.resultHead.innerHTML = `2人の賢者が、逆の答えを返した。<span class="hl">あなたはどっち？</span>`;
+    els.rerollBtn.hidden = true;
+    els.battleBtn.hidden = true;
+    els.cards.innerHTML = '';
+    els.cards.appendChild(buildBattle(pair));
+    els.results.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+
+  async function shareBattle(pair) {
+    toast('画像を作成中…');
+    try {
+      await ensureFontsReady();
+      const blob = await drawBattle(pair);
+      const file = new File([blob], 'kenja-battle.png', { type: 'image/png' });
+      const text = `「${(state.worry || 'この悩み').slice(0, 40)}」に、2人の賢者が逆の答え。あなたはどっち？`;
+      if (navigator.canShare && navigator.canShare({ files: [file] })) {
+        await navigator.share({ files: [file], text: text + '\n\n#賢者の返信' });
+        return;
+      }
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob); a.download = 'kenja-battle.png';
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+      toast('画像を保存しました');
+    } catch (e) { console.error(e); toast('画像の作成に失敗しました'); }
   }
 
   /* ---------------------------------------------------------------
@@ -360,6 +571,14 @@
 
     ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
 
+    // 悩み（Q）— スクショ単体でも「何への返信か」が伝わるように
+    const wtxt = (state.worry || '').trim();
+    if (wtxt && (state.mode === 'result' || state.mode === 'single')) {
+      const body = wtxt.length > 24 ? wtxt.slice(0, 24) + '…' : wtxt;
+      ctx.fillStyle = hexA(GOLD, 0.7); ctx.font = 'italic 25px "Cormorant Garamond", serif';
+      ctx.fillText('Q.  「' + body + '」', CX, 112);
+    }
+
     // 紋章
     drawEmblem(ctx, CX, 170, GOLDB);
 
@@ -418,11 +637,125 @@
       setLS(ctx, 0);
     }
 
-    // フッター
-    ctx.fillStyle = 'rgba(239,230,207,.5)'; ctx.font = 'italic 27px "Cormorant Garamond", serif';
-    ctx.fillText('賢者の返信   ·   Sapientia', CX, H - 74);
+    // フッター（本番URLを焼き込む＝転載1枚からの送客）
+    ctx.fillStyle = 'rgba(239,230,207,.55)'; ctx.font = 'italic 26px "Cormorant Garamond", serif';
+    ctx.fillText('賢者の返信   ·   ' + SHARE_URL, CX, H - 74);
 
     return new Promise((resolve) => cv.toBlob((b) => resolve(b), 'image/png'));
+  }
+
+  /* 賢者バトルの共有画像（1080×1080・Q&A構造＋URL入りで流入導線） */
+  function drawBattle(pair) {
+    const [qa, qb] = pair;
+    const cv = els.canvas, ctx = cv.getContext('2d');
+    const W = cv.width, H = cv.height, CX = W / 2;
+    const GOLD = '#d4af5a', GOLDB = '#f3d898', PARCH = '#efe6cf';
+
+    // 背景
+    const g = ctx.createRadialGradient(CX, 420, 60, CX, 560, 880);
+    g.addColorStop(0, '#19244f'); g.addColorStop(0.5, '#0c1330'); g.addColorStop(1, '#05070f');
+    ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+
+    // 二重金枠＋四隅
+    ctx.strokeStyle = hexA(GOLD, 0.75); ctx.lineWidth = 2.5; ctx.strokeRect(50, 50, W - 100, H - 100);
+    ctx.strokeStyle = hexA(GOLD, 0.4); ctx.lineWidth = 1.5; ctx.strokeRect(66, 66, W - 132, H - 132);
+    ctx.strokeStyle = GOLD; ctx.lineWidth = 2;
+    const off = 50, L = 34;
+    for (const [x, y, sx, sy] of [[off, off, 1, 1], [W - off, off, -1, 1], [off, H - off, 1, -1], [W - off, H - off, -1, -1]]) {
+      ctx.beginPath(); ctx.moveTo(x, y + sy * L); ctx.lineTo(x, y); ctx.lineTo(x + sx * L, y); ctx.stroke();
+    }
+    ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+
+    // 見出し
+    setLS(ctx, 12);
+    ctx.fillStyle = GOLD; ctx.font = '700 30px "Shippori Mincho", serif';
+    ctx.fillText('賢 者 バ ト ル', CX, 130);
+    setLS(ctx, 0);
+
+    // Q（悩み）
+    let qy = 184;
+    const qtext = (state.worry || '').trim();
+    ctx.font = '500 30px "Shippori Mincho", serif'; ctx.fillStyle = hexA(PARCH, 0.92);
+    if (qtext) {
+      const body = qtext.length > 46 ? qtext.slice(0, 46) + '…' : qtext;
+      const lines = wrapJa(ctx, '「' + body + '」', W - 260).slice(0, 2);
+      for (const ln of lines) { ctx.fillText(ln, CX, qy); qy += 42; }
+    } else {
+      ctx.fillText('ひとつの悩みに、二つの答え。', CX, qy); qy += 42;
+    }
+    decoDivider(ctx, CX, qy + 2, GOLD);
+
+    const top = qy + 26, bottom = 900;
+
+    // 中央の縦仕切り（VSの位置を空ける）
+    ctx.strokeStyle = hexA(GOLD, 0.45); ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.moveTo(CX, top + 8); ctx.lineTo(CX, 506); ctx.moveTo(CX, 626); ctx.lineTo(CX, bottom - 8); ctx.stroke();
+
+    // 左右
+    drawBattleSide(ctx, 292, qa, top, GOLD, GOLDB, PARCH);
+    drawBattleSide(ctx, W - 292, qb, top, GOLD, GOLDB, PARCH);
+
+    // VS
+    drawVS(ctx, CX, 566, GOLD, GOLDB);
+
+    // フッター
+    decoDivider(ctx, CX, bottom + 6, GOLD);
+    ctx.fillStyle = GOLDB; ctx.font = '700 36px "Shippori Mincho", serif';
+    ctx.fillText('あなたは、どっち派？', CX, bottom + 60);
+    ctx.fillStyle = hexA(PARCH, 0.55); ctx.font = 'italic 26px "Cormorant Garamond", serif';
+    ctx.fillText('賢者の返信  ·  ' + SHARE_URL, CX, H - 70);
+
+    return new Promise((resolve) => cv.toBlob((b) => resolve(b), 'image/png'));
+  }
+
+  function drawBattleSide(ctx, cx, q, top, GOLD, GOLDB, PARCH) {
+    const p = PHILOSOPHERS[q.phil], c = campOf(q.phil), maxW = 372;
+    let y = top + 44;
+    // 流派ラベル
+    setLS(ctx, 4);
+    ctx.fillStyle = c.color; ctx.font = '700 26px "Shippori Mincho", serif';
+    ctx.fillText('“' + c.label + '”', cx, y);
+    setLS(ctx, 0);
+    y += 56;
+    // 名前（長名はフィット）
+    let nf = 40;
+    while (nf > 26) { ctx.font = `700 ${nf}px "Shippori Mincho", serif`; if (ctx.measureText(p.name).width <= maxW) break; nf -= 2; }
+    ctx.fillStyle = GOLDB; ctx.fillText(p.name, cx, y);
+    y += 30;
+    ctx.fillStyle = hexA(PARCH, 0.55); ctx.font = 'italic 22px "Cormorant Garamond", serif';
+    ctx.fillText(p.dates, cx, y);
+    y += 46;
+    // フック
+    if (q.hook) {
+      let hf = 30, hl = [];
+      while (hf >= 22) { ctx.font = `700 ${hf}px "Shippori Mincho", serif`; hl = wrapJa(ctx, q.hook, maxW); if (hl.length <= 3) break; hf -= 2; }
+      ctx.fillStyle = GOLDB; ctx.font = `700 ${hf}px "Shippori Mincho", serif`;
+      for (const ln of hl.slice(0, 3)) { ctx.fillText(ln, cx, y); y += hf * 1.5; }
+      y += 10;
+    }
+    // 仕切り
+    ctx.strokeStyle = hexA(GOLD, 0.4); ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(cx - 56, y - 6); ctx.lineTo(cx + 56, y - 6); ctx.stroke();
+    y += 30;
+    // 名言（フィット＋はみ出しは…で省略）
+    let qf = 24, ql = [];
+    while (qf >= 17) { ctx.font = `500 ${qf}px "Shippori Mincho", serif`; ql = wrapJa(ctx, q.quote, maxW); if (ql.length * qf * 1.7 <= (878 - y)) break; qf -= 1; }
+    const maxLines = Math.max(1, Math.floor((878 - y) / (qf * 1.7)));
+    if (ql.length > maxLines) { ql = ql.slice(0, maxLines); ql[maxLines - 1] = ql[maxLines - 1].slice(0, -1) + '…'; }
+    ctx.fillStyle = PARCH; ctx.font = `500 ${qf}px "Shippori Mincho", serif`;
+    for (const ln of ql) { ctx.fillText(ln, cx, y); y += qf * 1.7; }
+  }
+
+  function drawVS(ctx, cx, cy, GOLD, GOLDB) {
+    ctx.save();
+    ctx.beginPath(); ctx.moveTo(cx, cy - 46); ctx.lineTo(cx + 40, cy); ctx.lineTo(cx, cy + 46); ctx.lineTo(cx - 40, cy); ctx.closePath();
+    ctx.fillStyle = '#0c1330'; ctx.fill();
+    ctx.strokeStyle = GOLD; ctx.lineWidth = 2; ctx.stroke();
+    ctx.fillStyle = GOLDB; ctx.font = '700 34px "Cormorant Garamond", serif';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText('VS', cx, cy + 1);
+    ctx.textBaseline = 'alphabetic';
+    ctx.restore();
   }
 
   function setLS(ctx, px) { try { ctx.letterSpacing = px + 'px'; } catch (e) {} }
@@ -574,6 +907,7 @@
     const { scored, themeKey } = scoreAll(worry);
     state.scored = scored;
     state.themeKey = themeKey;
+    state.grief = isGrief(worry);
     const quotes = pickTop(scored, NUM_CARDS, true);
     showResult(themeKey, quotes);
     updateHash(themeKey, quotes, worry);
@@ -598,6 +932,16 @@
     showResult(state.themeKey, quotes, { scroll: false });
     updateHash(state.themeKey, quotes, state.worry);
   });
+  if (els.battleBtn) els.battleBtn.addEventListener('click', () => {
+    if (!state.scored) { toast('まず悩みを入力してください'); return; }
+    const pair = pickBattle(state.scored);
+    if (pair) renderBattle(pair); else toast('対決できる相手が見つかりませんでした');
+  });
+  if (els.dailyOpen) els.dailyOpen.addEventListener('click', () => {
+    const q = dailyQuote();
+    state.worry = '';
+    showSingle(q, `🌅 <span class="hl">今日の賢者</span>　${escapeHTML(PHILOSOPHERS[q.phil].name)}`, false);
+  });
   els.copyLinkBtn.addEventListener('click', copyResultLink);
   els.favOpen.addEventListener('click', showFavorites);
 
@@ -612,10 +956,27 @@
     els.worry.focus();
   });
 
+  /* 日替わりパネルの初期化（今日の賢者＋連続来訪） */
+  function initDaily() {
+    if (!els.daily) return;
+    const q = dailyQuote(), p = PHILOSOPHERS[q.phil];
+    const s = updateStreak();
+    els.dailyHook.textContent = q.hook || q.quote;
+    els.dailyName.textContent = '— ' + p.name;
+    if (s.count >= 2) {
+      els.dailyStreak.hidden = false;
+      els.dailyStreak.textContent = `${s.count}日連続`;
+    } else {
+      els.dailyStreak.hidden = true;
+    }
+    els.daily.hidden = false;
+  }
+
   /* 起動 */
   function boot() {
     initBackground();
     updateFavUI();
+    initDaily();
     const fromHash = parseHash();
     if (fromHash) {
       if (fromHash.worry) { els.worry.value = fromHash.worry; els.count.textContent = fromHash.worry.length; }
